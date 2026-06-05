@@ -208,6 +208,7 @@ async def test_set_current_limit_normal(amina_zha_charger, mock_hass):
         service_data={"entity_id": ONOFF_ENTITY_ID},
         blocking=True,
     )
+    assert amina_zha_charger._paused is False
 
 
 async def test_set_current_limit_clamps_max(amina_zha_charger, mock_hass):
@@ -238,6 +239,7 @@ async def test_set_current_limit_below_min_turns_off(amina_zha_charger, mock_has
         service_data={"entity_id": ONOFF_ENTITY_ID},
         blocking=True,
     )
+    assert amina_zha_charger._paused is True
 
 
 async def test_set_current_limit_empty_turns_off(amina_zha_charger, mock_hass):
@@ -254,51 +256,35 @@ async def test_set_current_limit_empty_turns_off(amina_zha_charger, mock_hass):
 # --------------------------------------------------------------------------- #
 # get_current_limit
 # --------------------------------------------------------------------------- #
-def test_get_current_limit_multi_phase(amina_zha_charger):
-    """ON + multi-phase reports the limit on all phases."""
-    amina_zha_charger._get_entity_state.return_value = STATE_ON
-
-    def _state(key):
-        return {
-            AminaZhaEntityMap.ChargeLimit: "16",
-            AminaZhaEntityMap.SinglePhase: STATE_OFF,
-        }[key]
-
-    amina_zha_charger._get_entity_state_by_translation_key.side_effect = _state
-    assert amina_zha_charger.get_current_limit() == {
-        Phase.L1: 16,
-        Phase.L2: 16,
-        Phase.L3: 16,
-    }
+def test_get_current_limit_uniform(amina_zha_charger):
+    """The limit is reported uniformly across all phases (synced limits)."""
+    amina_zha_charger._paused = False
+    amina_zha_charger._get_entity_state_by_translation_key.return_value = "16"
+    assert amina_zha_charger.get_current_limit() == dict.fromkeys(Phase, 16)
 
 
-def test_get_current_limit_single_phase(amina_zha_charger):
-    """ON + single-phase reports the limit on L1 only."""
-    amina_zha_charger._get_entity_state.return_value = STATE_ON
+def test_get_current_limit_single_phase_still_uniform(amina_zha_charger):
+    """Even in single-phase mode the limit is reported uniformly.
 
-    def _state(key):
-        return {
-            AminaZhaEntityMap.ChargeLimit: "16",
-            AminaZhaEntityMap.SinglePhase: STATE_ON,
-        }[key]
-
-    amina_zha_charger._get_entity_state_by_translation_key.side_effect = _state
-    assert amina_zha_charger.get_current_limit() == {
-        Phase.L1: 16,
-        Phase.L2: 0,
-        Phase.L3: 0,
-    }
+    Reporting 0 on the unused phases would make min() always 0, which stops the
+    balancer from ever detecting a change for a synced-phase charger.
+    """
+    amina_zha_charger._paused = False
+    amina_zha_charger._get_entity_state_by_translation_key.return_value = "16"
+    result = amina_zha_charger.get_current_limit()
+    assert result == dict.fromkeys(Phase, 16)
+    assert min(result.values()) == 16
 
 
-def test_get_current_limit_off(amina_zha_charger):
-    """When the OnOff switch is off the limit is reported as zero."""
-    amina_zha_charger._get_entity_state.return_value = STATE_OFF
+def test_get_current_limit_paused(amina_zha_charger):
+    """While paused the limit is reported as zero without reading entities."""
+    amina_zha_charger._paused = True
     assert amina_zha_charger.get_current_limit() == dict.fromkeys(Phase, 0)
 
 
 def test_get_current_limit_missing(amina_zha_charger):
     """A missing charge_limit entity returns None."""
-    amina_zha_charger._get_entity_state.return_value = STATE_ON
+    amina_zha_charger._paused = False
     amina_zha_charger._get_entity_state_by_translation_key.return_value = None
     assert amina_zha_charger.get_current_limit() is None
 

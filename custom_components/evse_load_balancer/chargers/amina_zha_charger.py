@@ -3,7 +3,7 @@
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.const import STATE_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 
@@ -68,6 +68,12 @@ class AminaZhaCharger(HaDevice, Charger):
         """Initialize the Amina S ZHA charger."""
         HaDevice.__init__(self, hass, device_entry)
         Charger.__init__(self, hass, config_entry, device_entry)
+        # Tracks whether we paused the charger by switching it off (because a
+        # sub-6A limit was requested). The hardware can't charge below 6A, so a
+        # pause is modelled as "off"; this flag lets get_current_limit() report
+        # 0A while paused without having to (unreliably) infer it from the
+        # OnOff switch state.
+        self._paused: bool = False
         self.refresh_entities()
 
     @staticmethod
@@ -139,10 +145,12 @@ class AminaZhaCharger(HaDevice, Charger):
                 requested_current,
                 AMINA_HW_MIN_CURRENT,
             )
+            self._paused = True
             await self._async_set_switch(self._get_onoff_switch_entity_id(), on=False)
             return
 
         # At or above minimum: set the limit, then ensure the charger is ON.
+        self._paused = False
         value = min(requested_current, AMINA_HW_MAX_CURRENT)
         charge_limit_entity_id = self._get_entity_id_by_translation_key(
             AminaZhaEntityMap.ChargeLimit
@@ -158,10 +166,10 @@ class AminaZhaCharger(HaDevice, Charger):
 
     def get_current_limit(self) -> dict[Phase, int] | None:
         """Get the current charger limit in amps per phase."""
-        # When switched off the charger draws nothing, regardless of the
-        # configured charge_limit; report 0 to reflect that.
-        onoff_state = self._get_entity_state(self._get_onoff_switch_entity_id())
-        if onoff_state == STATE_OFF:
+        # While paused (we switched the charger off for a sub-6A request) the
+        # charger draws nothing; report 0 so the balancer can ramp it back up
+        # from a paused state once headroom returns.
+        if self._paused:
             return dict.fromkeys(Phase, 0)
 
         limit_state = self._get_entity_state_by_translation_key(
@@ -172,12 +180,11 @@ class AminaZhaCharger(HaDevice, Charger):
             return None
         limit = int(float(limit_state))
 
-        single_phase = (
-            self._get_entity_state_by_translation_key(AminaZhaEntityMap.SinglePhase)
-            == STATE_ON
-        )
-        if single_phase:
-            return {Phase.L1: limit, Phase.L2: 0, Phase.L3: 0}
+        # The Amina S has synced phase limits, so the balancer only compares
+        # min() across phases. Report the limit uniformly on every phase: zeroing
+        # the unused phases in single-phase mode would force min() to 0 and the
+        # balancer would never detect a change, so it would never adjust the
+        # charge limit.
         return dict.fromkeys(Phase, limit)
 
     def get_max_current_limit(self) -> dict[Phase, int] | None:
